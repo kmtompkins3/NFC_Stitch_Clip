@@ -4,101 +4,115 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ---
 
-## Project Summary
+## Projects in This Repo
 
-**Stitch Clip NFC Note Tool** — a zero-dependency, single-file web app that lets crocheters write and read short progress notes on NFC-embedded stitch clips using the Web NFC API.
-
-- Full requirements: [`docs/PRD.md`](docs/PRD.md)
-- Active task list: [`docs/tasks.md`](docs/tasks.md)
-
----
-
-## Architecture
-
-The entire application lives in one file:
-
-```
-src/index.html   ← HTML structure + <style> + <script> all embedded
-docs/PRD.md
-docs/tasks.md
-```
-
-There is **no build step, no bundler, no npm, no dependencies**. `src/index.html` is a fully self-contained static file deployable directly to GitHub Pages.
-
-### Key Design Constraints (from PRD)
-
-- **Single file only** — all HTML, CSS, and JS must remain in `src/index.html`.
-- **Vanilla JS (ES2020+)** — no libraries, no frameworks.
-- **Web NFC API** — `NDEFReader` is the only browser API for NFC. It is available exclusively in Chrome 89+ on Android. Do not polyfill or wrap it unnecessarily.
-- **`localStorage`** — used only for persisting the last-written note across sessions. No server, no database.
-- **`AbortController`** — required for cancelling pending NFC operations when the user switches tabs.
-
-### NFC Data Format
-
-NDEF records are written as plain text (`recordType: "text"`, UTF-8). No metadata or timestamps are stored on the tag in MVP — the payload is the raw note string only.
+| Project | Status | Entry point | PRD | Tasks |
+|---------|--------|-------------|-----|-------|
+| Web app (Android Chrome) | MVP complete | `src/index.html` | `docs/PRD.md` | `docs/tasks.md` |
+| iOS native app | **Active development** | `ios/` (to be created) | `docs/PRD_iOS_Native.md` | `docs/TASKS_iOS_Native.md` |
 
 ---
 
-## Development Workflow
+## iOS Native App
 
-### Run locally
+### Architecture
 
-Open `src/index.html` directly in Chrome for Android (or use a local HTTP server if testing over USB debugging):
+MVVM, single Xcode project targeting iOS 17+. Folder layout inside the Xcode project:
+
+```
+Models/       ← SwiftData @Model classes (Project, Tag, WriteEvent)
+Views/        ← SwiftUI views
+ViewModels/   ← ObservableObject / @Observable view models
+Services/     ← NFCService, ImageStorageService
+```
+
+**SwiftData model graph:**
+
+```
+Project  1──▶  [Tag]  1──▶  [WriteEvent]
+```
+
+- `Project`: id, name, patternLink?, imagePath?, startDate, endDate?, isCompleted, tags
+- `Tag`: id, notes, firstWriteAt, lastWriteAt, writeEvents
+- `WriteEvent`: id, timestamp, noteContent
+
+Images are stored as JPEG files at `<Documents>/images/<UUID>.jpg`; only the filename is persisted in the model.
+
+### Build & Test
+
+NFC is unavailable on the iOS Simulator — all NFC flows require a **physical iPhone running iOS 17+**.
 
 ```bash
-# Simple local server (Python)
-python -m http.server 8080
-# Then open http://localhost:8080/src/index.html in Chrome on Android
+# Build (Simulator, for UI testing only)
+xcodebuild -scheme NFCStitchClip \
+  -destination 'platform=iOS Simulator,name=iPhone 16' \
+  build
+
+# Run unit tests (Simulator)
+xcodebuild test -scheme NFCStitchClip \
+  -destination 'platform=iOS Simulator,name=iPhone 16'
+
+# Build for device (requires provisioning profile)
+xcodebuild -scheme NFCStitchClip \
+  -destination 'generic/platform=iOS' \
+  build
 ```
 
-Web NFC requires HTTPS or `localhost`. Testing on desktop Chrome will always show the unsupported-browser banner — that is correct behavior.
+### Required Xcode Configuration (do not skip)
 
-### Test on device
+Both of these must be in place before any NFC code will compile or run:
 
-1. Enable USB debugging on Android.
-2. Open `chrome://inspect` on desktop Chrome.
-3. Forward port 8080 → localhost:8080 on the device.
-4. Open `http://localhost:8080/src/index.html` in Android Chrome.
-5. Use a physical NTAG216 NFC sticker tag to test write/read.
+1. `NFCStitchClip.entitlements` — add key `com.apple.developer.nfc.readersession.formats` with value `NDEF`
+2. `Info.plist` — add key `NFCReaderUsageDescription` with a user-facing string
 
-### Deploy
+Dark mode is enforced at the app level, not per-view: add `UIUserInterfaceStyle = Dark` to `Info.plist`.
 
-Push to GitHub and enable GitHub Pages pointing at the repo root or `src/`. No CI pipeline is needed.
+### NFC Tag Format
+
+Every tag stores one NDEF Text record (UTF-8), JSON payload:
+
+```json
+{"projectId":"<UUID-string>","notes":"<user text>","timestamp":<unix-epoch-seconds>}
+```
+
+Storage footprint is ~150–180 bytes. Tags are NTAG216 (888-byte capacity). This format is iOS-app-specific — cross-platform compatibility is out of scope.
+
+### Exact User-Facing Strings (do not alter)
+
+| Event | String |
+|-------|--------|
+| Write success | `✓ Tag written successfully` |
+| Write failure | `Write failed. Please try again.` |
+| Read failure | `Read failed. Please try again.` |
+| Orphaned tag modal title | `Tag not linked to a project` |
+| Re-link success | `✓ Tag linked to [project name]` |
+
+### Behavioural Invariants
+
+- **No partial state on NFC failure** — if an NFC write fails, roll back any in-progress SwiftData changes before surfacing the error.
+- **No concurrent NFC sessions** — disable all NFC trigger buttons while a session is active.
+- **`firstWriteAt` preservation** — when re-linking an orphaned tag, set `Tag.firstWriteAt` from the `timestamp` field read off the physical tag, not from the current time.
+- **Orphaned tag modal requires valid NDEF JSON** — a completely blank or malformed tag never shows the modal; show "Read failed. Please try again." instead.
+
+### Time Tracking Logic (History tab)
+
+Estimated work time = sum of consecutive `WriteEvent.timestamp` gaps that are **≤ 12 hours**, across all tags in the project, sorted chronologically. Gaps > 12 hours are session breaks and are excluded. When there is only one write event, display "No time data yet".
+
+See `docs/PRD_iOS_Native.md §5.3` for the worked example and edge cases.
+
+### Out of Scope (iOS MVP)
+
+Cloud sync, user accounts, Android support, iPad-optimised layouts, tag custom naming, tag templates, PDF export, in-app purchases, iCloud sync. See `docs/PRD_iOS_Native.md §7`.
 
 ---
 
-## Status Messages (exact strings — do not alter)
+## Web App (`src/index.html`)
 
-These are user-facing and must match the PRD exactly:
+Single self-contained file — HTML + CSS + JS with no build step. Targets Chrome 89+ on Android via the Web NFC API (`NDEFReader`). The web app's NFC tag format is **plain text only** (no JSON) — this differs from the iOS app.
 
-| Event | Message |
-|-------|---------|
-| Write idle | `Ready to write` |
-| Awaiting tag (write) | `Tap tag now...` |
-| Write success | `✓ Note written successfully` |
-| Write timeout | `✗ Write timed out. Hold tag steady and try again.` |
-| Read-only tag | `✗ Tag is read-only and cannot be written to.` |
-| Write failure | `✗ Write failed. Please try again.` |
-| Awaiting tag (read) | `Tap tag to read...` |
-| Read success | `✓ Note retrieved` |
-| Blank tag | `✗ No note found on this tag. Write a note first.` |
-| Read out of range | `✗ Read failed. Tag may be out of range.` |
-| Damaged tag | `✗ Could not read tag. Tag may be damaged.` |
-| Unsupported browser | `NFC is not supported in this browser. Please use Chrome on Android.` |
-
----
-
-## Behavioural Invariants
-
-- The unsupported-browser banner is shown on load whenever `"NDEFReader" not in window` and **cannot be dismissed**.
-- All NFC buttons must be disabled while the banner is visible.
-- Buttons are disabled for the full duration of an active NFC operation (no double-tap).
-- Tab switching must always call `AbortController.abort()` before switching.
+Key invariants:
+- `AbortController.abort()` must be called on every tab switch.
 - `localStorage` is written only after a confirmed successful NFC write.
-- The note display area on the Read tab is hidden until a successful scan.
+- The unsupported-browser banner (`"NDEFReader" not in window`) is permanent and cannot be dismissed; all NFC buttons are disabled while it is visible.
 
----
-
-## Out of Scope for MVP
-
-Do not implement: PWA/service workers, timestamps on notes, project names, cloud sync, iOS support, user accounts, or analytics. See `docs/PRD.md §2` for the full exclusion list.
+See `docs/PRD.md` and `docs/tasks.md` for full detail.
